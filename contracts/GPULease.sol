@@ -55,22 +55,23 @@ contract GPULease {
         platformFeePercentage = _feePercentage;
     }
     
-    function startLease(
+    function startLeaseWithUser(
         uint _duration,
         uint _pricePerSecond,
-        address _provider
+        address _provider,
+        address _user
     ) external returns (uint leaseId) {
         require(_duration > 0, "Duration must be > 0");
         require(_pricePerSecond > 0, "Price per second must be > 0");
         
         uint totalAmount = _duration * _pricePerSecond;
-        require(token.balanceOf(msg.sender) >= totalAmount, "Insufficient token balance");
+        require(token.balanceOf(_user) >= totalAmount, "Insufficient token balance");
         
         // Calculate platform fee
         uint platformFee = (totalAmount * platformFeePercentage) / 100;
         
         // Transfer tokens to contract (including platform fee)
-        require(token.transferFrom(msg.sender, address(this), totalAmount), "Transfer failed");
+        require(token.transferFrom(_user, address(this), totalAmount), "Transfer failed");
         
         // Transfer platform fee to deployer
         require(token.transfer(deployer, platformFee), "Platform fee transfer failed");
@@ -79,7 +80,7 @@ contract GPULease {
         leaseCount++;
         
         leases[leaseId] = Lease({
-            user: msg.sender,
+            user: _user,
             provider: _provider,
             startTime: block.timestamp,
             duration: _duration,
@@ -89,11 +90,20 @@ contract GPULease {
             completed: false
         });
         
-        emit LeaseStarted(leaseId, msg.sender, _provider, _duration, totalAmount);
+        emit LeaseStarted(leaseId, _user, _provider, _duration, totalAmount);
         emit PaymentReceived(leaseId, totalAmount);
         emit PlatformFeeCollected(leaseId, platformFee);
         
         return leaseId;
+    }
+    
+    function startLease(
+        uint _duration,
+        uint _pricePerSecond,
+        address _provider
+    ) external returns (uint leaseId) {
+        uint lid = this.startLeaseWithUser(_duration, _pricePerSecond, _provider, msg.sender);
+        return lid;
     }
     
     function completeLease(uint _leaseId) external onlyOwner(_leaseId) {
