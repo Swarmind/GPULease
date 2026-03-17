@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// Интерфейс ERC-20
-interface IERC20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function allowance(address owner, address spender) external view returns (uint256);
-}
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 
-contract GPULease {
+contract GPULease is AccessControl {
+    
     struct Lease {
         address user;
         address provider;
@@ -22,12 +17,17 @@ contract GPULease {
         bool completed;
     }
 
+    // User balances mapping
+    mapping(address => uint256) public userBalances;
+    
+    // Locked funds for leases mapping  
+    mapping(uint => uint256) public lockedFunds;
+    
     IERC20 public token;
     mapping(uint => Lease) public leases;
     uint public leaseCount = 0;
     
     // Platform fee parameters
-    address public deployer;
     uint public platformFeePercentage = 5; // 5% platform fee
     
     event LeaseStarted(uint leaseId, address user, address provider, uint duration, uint amount);
@@ -35,24 +35,46 @@ contract GPULease {
     event LeaseCancelled(uint leaseId, uint refund);
     event PaymentReceived(uint leaseId, uint amount);
     event PlatformFeeCollected(uint leaseId, uint feeAmount);
+    event UserDeposited(address user, uint amount);
+    event UserWithdrawn(address user, uint amount);
     
-    modifier onlyOwner(uint _leaseId) {
-        require(leases[_leaseId].user == msg.sender || leases[_leaseId].provider == msg.sender, "Only user or provider can call this");
-        _;
-    }
-    
-    modifier onlyDeployer() {
-        require(msg.sender == deployer, "Only deployer can call this");
+    address deployer;
+
+
+    // operation with leaseID shoud be available only by deal participant or the admin of the contract (in case of delegated call)
+    modifier onlyLeaseOwner(uint _leaseId) {
+        require(leases[_leaseId].user == msg.sender || leases[_leaseId].provider == msg.sender || msg.sender == deployer, "Only user or provider can call this");
         _;
     }
     
     constructor(address _token) {
         token = IERC20(_token);
-        deployer = msg.sender; // Set deployer as the contract owner
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender); // Grant default admin role to deployer
+        deployer = msg.sender;
     }
     
-    function setPlatformFee(uint _feePercentage) external onlyDeployer {
+    function setPlatformFee(uint _feePercentage) external onlyRole(DEFAULT_ADMIN_ROLE) {
         platformFeePercentage = _feePercentage;
+    }
+    
+    /**
+     * @dev Deposit tokens to user balance
+     */
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Deposit amount must be > 0");
+        token.transferFrom(msg.sender, address(this), amount);
+        userBalances[msg.sender] = userBalances[msg.sender] + amount;
+        emit UserDeposited(msg.sender, amount);
+    }
+    
+    /**
+     * @dev Withdraw tokens from user balance
+     */
+    function withdraw(uint256 amount) external {
+        require(userBalances[msg.sender] >= amount, "Insufficient balance");
+        userBalances[msg.sender] = userBalances[msg.sender] - amount;
+        token.transfer(msg.sender, amount);
+        emit UserWithdrawn(msg.sender, amount);
     }
     
     function startLeaseWithUser(
@@ -65,16 +87,14 @@ contract GPULease {
         require(_pricePerSecond > 0, "Price per second must be > 0");
         
         uint totalAmount = _duration * _pricePerSecond;
-        require(token.balanceOf(_user) >= totalAmount, "Insufficient token balance");
+        require(userBalances[_user] >= totalAmount, "Insufficient token balance");
         
         // Calculate platform fee
         uint platformFee = (totalAmount * platformFeePercentage) / 100;
         
-        // Transfer tokens to contract (including platform fee)
-        require(token.transferFrom(_user, address(this), totalAmount), "Transfer failed");
-        
-        // Transfer platform fee to deployer
-        require(token.transfer(deployer, platformFee), "Platform fee transfer failed");
+        // Deduct funds from user balance and lock them in lockedFunds mapping by leaseId
+        userBalances[_user] = userBalances[_user] - totalAmount;
+        lockedFunds[leaseCount] = totalAmount;
         
         leaseId = leaseCount;
         leaseCount++;
@@ -106,7 +126,7 @@ contract GPULease {
         return lid;
     }
     
-    function completeLease(uint _leaseId) external onlyOwner(_leaseId) {
+    function completeLease(uint _leaseId) external onlyLeaseOwner(_leaseId) {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
@@ -115,10 +135,15 @@ contract GPULease {
         uint actualCost = actualDuration * lease.pricePerSecond;
         uint refund = lease.totalAmount - actualCost;
         
+        // Refund unused amount back to user's balance
         if (refund > 0) {
-            require(token.transfer(lease.user, refund), "Refund transfer failed");
+            userBalances[lease.user] = userBalances[lease.user] + refund;
         }
+        // Transfer actual cost to provider
         require(token.transfer(lease.provider, actualCost), "Provider transfer failed");
+        
+        // Unlock the funds from lockedFunds mapping 
+        delete lockedFunds[_leaseId];
         
         lease.completed = true;
         lease.active = false;
@@ -126,7 +151,7 @@ contract GPULease {
         emit LeaseCompleted(_leaseId, refund, actualCost);
     }
     
-    function cancelLease(uint _leaseId) external onlyOwner(_leaseId) {
+    function cancelLease(uint _leaseId) external onlyLeaseOwner(_leaseId) {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
@@ -134,7 +159,12 @@ contract GPULease {
         require(block.timestamp < lease.startTime + 300, "Cannot cancel after 5 minutes");
         
         uint refund = lease.totalAmount;
-        require(token.transfer(lease.user, refund), "Refund transfer failed");
+        
+        // Return funds back to user's balance
+        userBalances[lease.user] = userBalances[lease.user] + refund;
+        
+        // Unlock the funds from lockedFunds mapping 
+        delete lockedFunds[_leaseId];
         
         lease.active = false;
         lease.completed = true;
