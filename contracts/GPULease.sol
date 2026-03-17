@@ -3,8 +3,9 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract GPULease is AccessControl {
+contract GPULease is AccessControl, ReentrancyGuard {
     
     struct Lease {
         address user;
@@ -38,12 +39,18 @@ contract GPULease is AccessControl {
     event UserDeposited(address user, uint amount);
     event UserWithdrawn(address user, uint amount);
     
-    address deployer;
+    address public deployer;
 
 
     // operation with leaseID shoud be available only by deal participant or the admin of the contract (in case of delegated call)
     modifier onlyLeaseOwner(uint _leaseId) {
         require(leases[_leaseId].user == msg.sender || leases[_leaseId].provider == msg.sender || msg.sender == deployer, "Only user or provider can call this");
+        _;
+    }
+
+    // Only admin can start lease on behalf of a user
+    modifier onlyAdminOrContract() {
+        require(msg.sender == deployer || msg.sender == address(this), "Only admin or contract itself can call this");
         _;
     }
     
@@ -60,7 +67,7 @@ contract GPULease is AccessControl {
     /**
      * @dev Deposit tokens to user balance
      */
-    function deposit(uint256 amount) external {
+    function deposit(uint256 amount) external nonReentrant {
         require(amount > 0, "Deposit amount must be > 0");
         token.transferFrom(msg.sender, address(this), amount);
         userBalances[msg.sender] = userBalances[msg.sender] + amount;
@@ -70,7 +77,7 @@ contract GPULease is AccessControl {
     /**
      * @dev Withdraw tokens from user balance
      */
-    function withdraw(uint256 amount) external {
+    function withdraw(uint256 amount) external nonReentrant {
         require(userBalances[msg.sender] >= amount, "Insufficient balance");
         userBalances[msg.sender] = userBalances[msg.sender] - amount;
         token.transfer(msg.sender, amount);
@@ -82,7 +89,7 @@ contract GPULease is AccessControl {
         uint _pricePerSecond,
         address _provider,
         address _user
-    ) external returns (uint leaseId) {
+    ) public onlyAdminOrContract nonReentrant returns (uint leaseId) {
         require(_duration > 0, "Duration must be > 0");
         require(_pricePerSecond > 0, "Price per second must be > 0");
         
@@ -121,12 +128,13 @@ contract GPULease is AccessControl {
         uint _duration,
         uint _pricePerSecond,
         address _provider
-    ) external returns (uint leaseId) {
+    ) external nonReentrant returns (uint leaseId) {
+        // Anyone can call this - they start a lease for themselves
         uint lid = this.startLeaseWithUser(_duration, _pricePerSecond, _provider, msg.sender);
         return lid;
     }
     
-    function completeLease(uint _leaseId) external onlyLeaseOwner(_leaseId) {
+    function completeLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
@@ -135,12 +143,22 @@ contract GPULease is AccessControl {
         uint actualCost = actualDuration * lease.pricePerSecond;
         uint refund = lease.totalAmount - actualCost;
         
+        // Calculate platform fee from the actual cost
+        uint platformFee = (actualCost * platformFeePercentage) / 100;
+        uint providerAmount = actualCost - platformFee;
+        
         // Refund unused amount back to user's balance
         if (refund > 0) {
             userBalances[lease.user] = userBalances[lease.user] + refund;
         }
-        // Transfer actual cost to provider
-        require(token.transfer(lease.provider, actualCost), "Provider transfer failed");
+        
+        // Transfer actual cost minus platform fee to provider
+        require(token.transfer(lease.provider, providerAmount), "Provider transfer failed");
+        
+        // Collect platform fee 
+        if (platformFee > 0) {
+            require(token.transfer(deployer, platformFee), "Platform fee transfer failed");
+        }
         
         // Unlock the funds from lockedFunds mapping 
         delete lockedFunds[_leaseId];
@@ -148,14 +166,15 @@ contract GPULease is AccessControl {
         lease.completed = true;
         lease.active = false;
         
-        emit LeaseCompleted(_leaseId, refund, actualCost);
+        emit LeaseCompleted(_leaseId, refund, providerAmount);
     }
     
-    function cancelLease(uint _leaseId) external onlyLeaseOwner(_leaseId) {
+    function cancelLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
         
+        // Cancel within 5 minutes (300 seconds)
         require(block.timestamp < lease.startTime + 300, "Cannot cancel after 5 minutes");
         
         uint refund = lease.totalAmount;
