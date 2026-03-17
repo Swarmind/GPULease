@@ -1,191 +1,93 @@
 # GPULease - Ethereum GPU Leasing Platform
 
-This project implements a decentralized GPU leasing platform on Ethereum using Solidity smart contracts. The platform allows users to lease GPU resources from providers in a trustless manner.
+A smart contract for leasing GPU computing resources with flexible pricing and pause/resume functionality.
 
-## Project Overview
+## Overview
 
-The core of the project is the `GPULease.sol` contract, which enables:
+GPULease is a decentralized smart contract that enables users to lease GPU compute and storage resources from providers. The system handles payment processing, platform fee collection, and provides mechanisms for pausing and resuming leases.
 
-- **Lease Creation**: Users can start GPU leases by specifying duration and price per second
-- **Secure Payments**: Funds are held in escrow and only released to providers upon lease completion
-- **Automatic Refunds**: Users receive refunds for unused time after lease completion
-- **Cancellation Policy**: Leases can be cancelled within 5 minutes with full refund
-- **Real-time Status Tracking**: Users can check lease status and contract balance
+## Features
 
-The project uses Hardhat 3 Beta with TypeScript, mocha for testing, and ethers.js for Ethereum interactions.
+- **Flexible Pricing**: Separate pricing for storage and computation per second
+- **Platform Fee System**: 5% platform fee (configurable)
+- **Pause/Resume Functionality**: Leases can be paused during execution with accurate cost calculation
+- **Lease Cancellation**: Within 5 minutes of creation
+- **Refund Mechanism**: Automatic refunds for unused time
+- **Access Control**: Role-based permissions using OpenZeppelin AccessControl
 
-## Smart Contract Features
+## Contract Structure
 
-The `GPULease` contract includes:
+### Core Data Structures
 
-- **Lease Management**: Start, complete, and cancel leases
-- **Payment Processing**: Handle ERC-20 token transfers for payments
-- **Access Control**: Only lease owners or providers can perform actions
-- **Event Logging**: Emit events for lease creation, completion, and cancellation
-- **Balance Tracking**: Monitor contract balance and lease status
-
-## Usage
-
-### Running Tests
-
-To run all tests in the project:
-
-```shell
-npx hardhat test
-```
-
-You can also selectively run Solidity or TypeScript tests:
-
-```shell
-npx hardhat test solidity
-npx hardhat test mocha
-```
-
-### Deployment to Sepolia
-
-This project includes an Ignition module to deploy the contract. You can deploy to a local chain or to Sepolia.
-
-To run the deployment to a local chain:
-
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
-```
-
-To run the deployment to Sepolia, you need an account with funds. The provided Hardhat configuration includes a `SEPOLIA_PRIVATE_KEY` variable.
-
-Set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin:
-
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-```
-
-After setting the variable, run the deployment:
-
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
-
-## Smart Contract Details
-
-The `GPULease` contract manages GPU leasing operations with the following structure:
-
-- **Lease Structure**: Tracks user, provider, duration, price, and status
-- **Token Integration**: Uses ERC-20 tokens for payments
-- **Time-Based Calculations**: Calculates actual costs based on lease duration
-- **Refund System**: Provides automatic refunds for unused time
-- **Security Measures**: Includes access controls and time-based cancellation limits
-
-## Contract Function Usage
-
-Here's how to use the functions in the GPULease contract:
-
-### 1. Starting a Lease
-
-To start a lease, call the `startLease` function with the following parameters:
-
+**Lease Struct**
 ```solidity
-function startLease(
-    uint _duration,
-    uint _pricePerSecond,
-    address _provider
-) external returns (uint leaseId)
+struct Lease {
+    address user;                    // The lease requester
+    address provider;                // The GPU provider
+    uint startTime;                  // When the lease started
+    uint duration;                   // Total lease duration in seconds
+    uint storagePricePerSecond;      // Price per second for storage
+    uint computePricePerSecond;      // Price per second for computation
+    uint totalAmount;                // Total amount to be paid
+    bool active;                     // Whether the lease is currently active
+    bool completed;                  // Whether the lease has been completed
+    bool paused;                     // Whether the lease is currently paused
+    uint lastPausedTime;             // Time when lease was last paused
+    uint pausedDuration;             // Cumulative duration of pauses in seconds
+}
 ```
 
-**Parameters:**
-- `_duration`: The duration of the lease in seconds
-- `_pricePerSecond`: The price per second in wei
-- `_provider`: The address of the GPU provider
+### Key Functions
 
-**Returns:**
-- `leaseId`: The ID of the newly created lease
+**Deposit & Withdraw**
+- `deposit(amount)`: Add tokens to your account balance
+- `withdraw(amount)`: Remove tokens from your account balance
 
-**Example:**
-```javascript
-// Assuming you have already deployed the contract and have the contract instance
-const leaseId = await contract.startLease(3600, 1000000000, providerAddress);
-```
+**Lease Management**
+- `startLease(duration, storagePricePerSecond, computePricePerSecond, provider)`: Start a lease for yourself
+- `startLeaseWithUser(duration, storagePricePerSecond, computePricePerSecond, provider, user)`: Admin can start a lease on behalf of another user
+- `pauseLease(leaseId)`: Pause an active lease (only the user or provider can call)
+- `resumeLease(leaseId)`: Resume a paused lease (only the user or provider can call)
+- `completeLease(leaseId)`: Complete an active lease and settle payments
+- `cancelLease(leaseId)`: Cancel a lease within 5 minutes
 
-### 2. Completing a Lease
+**Utility Functions**
+- `getContractBalance()`: Check contract's token balance
+- `getLeaseStatus(leaseId)`: Get detailed information about a specific lease
 
-To complete a lease, call the `completeLease` function with the lease ID:
+## Security Features
 
-```solidity
-function completeLease(uint _leaseId) external onlyOwner(_leaseId)
-```
+- **ReentrancyGuard**: Prevents reentrant calls during critical operations
+- **Access Control**: Role-based permissions for administrative functions
+- **Platform Fee Management**: Admin can update platform fee percentage
 
-**Parameters:**
-- `_leaseId`: The ID of the lease to complete
+## Events
 
-**Requirements:**
-- The caller must be the lease owner or provider
-- The lease must be active
-- The lease must not be already completed
+The contract emits the following events:
+- `LeaseStarted`: When a lease is created
+- `LeaseCompleted`: When a lease is completed successfully 
+- `LeaseCancelled`: When a lease is cancelled
+- `PaymentReceived`: When payment is received for a lease
+- `PlatformFeeCollected`: When platform fee is collected
+- `UserDeposited`: When a user deposits tokens
+- `UserWithdrawn`: When a user withdraws tokens
+- `LeasePaused`: When a lease is paused
+- `LeaseResumed`: When a lease is resumed
 
-**Example:**
-```javascript
-// Complete a lease with ID 0
-await contract.completeLease(0);
-```
+## Usage Flow
 
-### 3. Canceling a Lease
+1. **Deposit Tokens**: Users must deposit tokens to their account balance before starting leases
+2. **Start Lease**: Choose duration and pricing, then start the lease  
+3. **Pause/Resume** (Optional): During execution, pause or resume the lease
+4. **Complete/Cancellation**: Either complete the lease or cancel it within 5 minutes
 
-To cancel a lease, call the `cancelLease` function with the lease ID:
+## Contract Parameters
 
-```solidity
-function cancelLease(uint _leaseId) external onlyOwner(_leaseId)
-```
+- `platformFeePercentage`: Default 5% platform fee (modifiable by admin)
+- All prices are expressed in smallest token units (wei)
 
-**Parameters:**
-- `_leaseId`: The ID of the lease to cancel
+## Access Control
 
-**Requirements:**
-- The caller must be the lease owner or provider
-- The lease must be active
-- The lease must not be already completed
-- The cancellation must happen within 5 minutes of lease start
-
-**Example:**
-```javascript
-// Cancel a lease with ID 0
-await contract.cancelLease(0);
-```
-
-### 4. Getting Lease Status
-
-To get the status of a lease, call the `getLeaseStatus` function with the lease ID:
-
-```solidity
-function getLeaseStatus(uint _leaseId) external view returns (bool active, bool completed, uint startTime, uint duration)
-```
-
-**Parameters:**
-- `_leaseId`: The ID of the lease to check
-
-**Returns:**
-- `active`: Whether the lease is active
-- `completed`: Whether the lease is completed
-- `startTime`: The start time of the lease
-- `duration`: The duration of the lease
-
-**Example:**
-```javascript
-const [active, completed, startTime, duration] = await contract.getLeaseStatus(0);
-```
-
-### 5. Getting Contract Balance
-
-To get the current balance of the contract, call the `getContractBalance` function:
-
-```solidity
-function getContractBalance() external view returns (uint)
-```
-
-**Returns:**
-- The current balance of the contract in wei
-
-**Example:**
-```javascript
-const balance = await contract.getContractBalance();
-```
-
-This project demonstrates a practical implementation of decentralized GPU resource allocation on Ethereum.
+The contract uses OpenZeppelin's AccessControl with:
+- `DEFAULT_ADMIN_ROLE`: Can set platform fees and perform administrative functions
+- Lease participants: Users and providers can manage their own leases
