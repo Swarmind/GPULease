@@ -38,7 +38,7 @@ describe("GPULease", function () {
   describe("Deployment", function () {
     it("Should set the right deployer and token", async function () {
       expect(await gpulease.deployer()).to.equal(deployer.address);
-      expect(await gpulease.token()).to.equal(mockToken.getAddress());
+      expect(await gpulease.token()).to.equal(await mockToken.getAddress())
     });
 
     it("Should set default platform fee percentage", async function () {
@@ -316,15 +316,17 @@ describe("GPULease", function () {
     });
 
     it("Should allow admin to set platform fee", async function () {
-        const newFee = 10;
-            
-        // Call the function and verify it doesn't revert
-        await expect(gpulease.connect(deployer).setPlatformFee(newFee))
-          .to.not.be.revert;
-            
-        // Check that platformFeePercentage was correctly updated
-        expect(await gpulease.platformFeePercentage()).to.equal(newFee);
-      });
+      const newFee = 10;
+    
+      // 1. Отправляем транзакцию от админа
+      const tx = await gpulease.connect(deployer).setPlatformFee(newFee);
+    
+      // 2. Явно ждём её включения в блок
+      await tx.wait();
+    
+      // 3. Проверяем, что значение обновилось
+      expect(await gpulease.platformFeePercentage()).to.equal(newFee);
+    });
   });
 
   describe("Contract Balance", function () {
