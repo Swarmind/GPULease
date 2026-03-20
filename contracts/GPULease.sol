@@ -1,118 +1,115 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.28;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract GPULease is AccessControl, ReentrancyGuard {
-    
-    struct Lease {
+contract GPULease is Ownable {
+    using SafeERC20 for IERC20;
+    IERC20 public credit; 
+    address public treasury;
+
+     struct Lease {
         address user;
         address provider;
         uint startTime;
-        uint duration;
         uint storagePricePerSecond; // Price per second for storage
         uint computePricePerSecond; // Price per second for computation
-        uint totalAmount; // Total amount to be paid (both storage and compute)
         bool active;
         bool completed;
-        bool paused; // Lease can be paused during execution
-        uint lastPausedTime; // Time when lease was last paused
+        bool paused; // Lease can be paused during execution 
+        uint pausedAt; // Time when lease was paused
         uint pausedDuration; // Cumulative duration of pauses in seconds
     }
 
-    // User balances mapping
-    mapping(address => uint256) public userBalances;
-    
-    // Locked funds for leases mapping  
-    mapping(uint => uint256) public lockedFunds;
-    
-    IERC20 public token;
+    struct FrozenFundsInfo {
+        uint leaseId;
+        uint256 amount;
+    }
+
+    mapping(address => uint[]) public userActiveLeases;
+    mapping(address => uint256) public balances;
+    mapping(uint => uint256) public frozenFunds;
     mapping(uint => Lease) public leases;
     uint public leaseCount = 0;
-    
-    // Platform fee parameters
+
     uint public platformFeePercentage = 5; // 5% platform fee
+
+    event Deposit(address indexed user, uint256 amount);
+    event Withdraw(address indexed user, uint256 amount);
     
     event LeaseStarted(uint leaseId, address user, address provider, uint duration, uint amount);
-    event LeaseCompleted(uint leaseId, uint refund, uint providerReward);
-    event LeaseCancelled(uint leaseId, uint refund);
-    event PaymentReceived(uint leaseId, uint amount);
-    event PlatformFeeCollected(uint leaseId, uint feeAmount);
-    event UserDeposited(address user, uint amount);
-    event UserWithdrawn(address user, uint amount);
+    event LeaseCompleted(uint leaseId);
     event LeasePaused(uint leaseId);
     event LeaseResumed(uint leaseId);
-    
-    address public deployer;
 
+ 
 
-    // operation with leaseID shoud be available only by deal participant or the admin of the contract (in case of delegated call)
-    modifier onlyLeaseOwner(uint _leaseId) {
-        require(leases[_leaseId].user == msg.sender || leases[_leaseId].provider == msg.sender || msg.sender == deployer, "Only user or provider can call this");
-        _;
+    constructor(address credit_, address treasury_) Ownable(msg.sender) {
+        credit = IERC20(credit_);
+        treasury = treasury_;
     }
 
-    // Only admin can start lease on behalf of a user
-    modifier onlyAdminOrContract() {
-        require(msg.sender == deployer || msg.sender == address(this), "Only admin or contract itself can call this");
-        _;
-    }
-    
-    constructor(address _token) {
-        token = IERC20(_token);
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender); // Grant default admin role to deployer
-        deployer = msg.sender;
-    }
-    
-    function setPlatformFee(uint _feePercentage) external onlyRole(DEFAULT_ADMIN_ROLE) {
+
+    //admin stuff
+    function setPlatformFee(uint _feePercentage) public onlyOwner {
+        require(_feePercentage <= 100, "Fee too high");
         platformFeePercentage = _feePercentage;
     }
-    
-    /**
-     * @dev Deposit tokens to user balance
-     */
-    function deposit(uint256 amount) external nonReentrant {
-        require(amount > 0, "Deposit amount must be > 0");
-        token.transferFrom(msg.sender, address(this), amount);
-        userBalances[msg.sender] = userBalances[msg.sender] + amount;
-        emit UserDeposited(msg.sender, amount);
+    function setTreasury(address newTreasury) external onlyOwner {
+        require(newTreasury != address(0), "zero treasury");
+        uint amount = userBalance(treasury);
+        balances[newTreasury] += amount;
+        balances[treasury] = 0;    
+        treasury = newTreasury;
     }
-    
-    /**
-     * @dev Withdraw tokens from user balance
-     */
-    function withdraw(uint256 amount) external nonReentrant {
-        require(userBalances[msg.sender] >= amount, "Insufficient balance");
-        userBalances[msg.sender] = userBalances[msg.sender] - amount;
-        token.transfer(msg.sender, amount);
-        emit UserWithdrawn(msg.sender, amount);
+
+
+   //wallet stuff
+    function deposit(uint256 amount) external {
+        credit.safeTransferFrom(msg.sender, address(this), amount);
+        balances[msg.sender] += amount;
+        emit Deposit(msg.sender, amount);
     }
-    
-    function startLeaseWithUser(
+
+    function withdraw(uint256 amount) external {
+        require(balances[msg.sender] >= amount, "insufficient balance");
+        credit.safeTransfer(msg.sender, amount);
+        balances[msg.sender] -= amount;
+        emit Withdraw(msg.sender, amount);
+    }
+   
+    function userBalance(address user) public view returns (uint256) {
+    return balances[user];
+    }
+
+
+    //lease stuff
+    function startLease(
         uint _duration,
         uint _storagePricePerSecond,
         uint _computePricePerSecond,
         address _provider,
         address _user
-    ) public onlyAdminOrContract nonReentrant returns (uint leaseId) {
+    ) public onlyOwner returns (uint leaseId) {
         require(_duration > 0, "Duration must be > 0");
         require(_storagePricePerSecond > 0 || _computePricePerSecond > 0, "At least one price must be > 0");
+        require(_user != address(0), "invalid user");
+        require(_provider != address(0), "invalid provider");
         
         // Calculate total amounts for both storage and compute
         uint totalStorageAmount = _duration * _storagePricePerSecond;
         uint totalComputeAmount = _duration * _computePricePerSecond;
         uint totalAmount = totalStorageAmount + totalComputeAmount;
-        
-        require(userBalances[_user] >= totalAmount, "Insufficient token balance");
-        
-        // Calculate platform fee
         uint platformFee = (totalAmount * platformFeePercentage) / 100;
-        
+        totalAmount += platformFee; 
+       
+        require(balances[_user] >= totalAmount, "Insufficient token balance");
+                
         // Deduct funds from user balance and lock them in lockedFunds mapping by leaseId
-        userBalances[_user] = userBalances[_user] - totalAmount;
-        lockedFunds[leaseCount] = totalAmount;
+        balances[_user] = balances[_user] - totalAmount;
+        frozenFunds[leaseCount] = totalAmount;
         
         leaseId = leaseCount;
         leaseCount++;
@@ -120,87 +117,48 @@ contract GPULease is AccessControl, ReentrancyGuard {
         leases[leaseId] = Lease({
             user: _user,
             provider: _provider,
-            startTime: block.timestamp,
-            duration: _duration,
+            startTime: block.timestamp - 5 minutes, //so we won't need any cancel function
             storagePricePerSecond: _storagePricePerSecond,
             computePricePerSecond: _computePricePerSecond,
-            totalAmount: totalAmount,
             active: true,
             completed: false,
             paused: false,
-            lastPausedTime: 0,
+            pausedAt: 0,
             pausedDuration: 0
         });
-        
+        userActiveLeases[_user].push(leaseId);
         emit LeaseStarted(leaseId, _user, _provider, _duration, totalAmount);
-        emit PaymentReceived(leaseId, totalAmount);
-        emit PlatformFeeCollected(leaseId, platformFee);
-        
         return leaseId;
     }
-    
-    function startLease(
-        uint _duration,
-        uint _storagePricePerSecond,
-        uint _computePricePerSecond,
-        address _provider
-    ) external nonReentrant returns (uint leaseId) {
-        // Anyone can call this - they start a lease for themselves
-        uint lid = this.startLeaseWithUser(_duration, _storagePricePerSecond, _computePricePerSecond, _provider, msg.sender);
-        return lid;
-    }
-    
-    function pauseLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
+
+     function pauseLease(uint _leaseId) public onlyOwner {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
         require(!lease.paused, "Lease is already paused");
         
         // Set the pause time
-        lease.lastPausedTime = block.timestamp;
+        lease.pausedAt = block.timestamp;
         lease.paused = true;
         
         emit LeasePaused(_leaseId);
     }
     
-    function resumeLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
+    function resumeLease(uint _leaseId) external onlyOwner {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
         require(lease.paused, "Lease is not paused");
         
-        // Calculate the duration of this pause
-        uint pauseDuration = block.timestamp - lease.lastPausedTime;
+        uint pauseDuration = block.timestamp - lease.pausedAt;
         lease.pausedDuration += pauseDuration;
-        lease.lastPausedTime = 0; // Reset last paused time
+        lease.pausedAt = 0; // Reset last paused time
         lease.paused = false;
         
         emit LeaseResumed(_leaseId);
     }
-    
-    function calculateActualCost(uint _leaseId) internal view returns (uint actualStorageCost, uint actualComputeCost) {
-        Lease storage lease = leases[_leaseId];
-        
-        // Calculate the effective duration by excluding paused time
-        uint effectiveDuration;
-        if (lease.paused) {
-            // If currently paused, don't count the current pause period in the effective duration 
-            effectiveDuration = block.timestamp - lease.startTime - lease.pausedDuration;
-        } else {
-            // If not paused, use full duration minus pauses
-            effectiveDuration = block.timestamp - lease.startTime - lease.pausedDuration;
-        }
-        
-        // Ensure we have a valid duration (cannot be negative)
-        if (effectiveDuration > lease.duration) {
-            effectiveDuration = lease.duration;
-        }
-        
-        actualStorageCost = effectiveDuration * lease.storagePricePerSecond;
-        actualComputeCost = effectiveDuration * lease.computePricePerSecond;
-    }
-    
-    function completeLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
+
+    function completeLease(uint _leaseId) external onlyOwner  {
         Lease storage lease = leases[_leaseId];
         require(lease.active, "Lease is not active");
         require(!lease.completed, "Lease already completed");
@@ -211,62 +169,79 @@ contract GPULease is AccessControl, ReentrancyGuard {
         
         // Total cost based on the effective duration
         uint actualTotalCost = actualStorageCost + actualComputeCost; 
-        uint refund = lease.totalAmount - actualTotalCost;
+        
         
         // Calculate platform fee from the total actual cost
         uint platformFee = (actualTotalCost * platformFeePercentage) / 100;
+        balances[treasury] += platformFee;
+        frozenFunds[_leaseId] -= platformFee;
+
         uint providerAmount = actualTotalCost - platformFee;
-        
-        // Refund unused amount back to user's balance
-        if (refund > 0) {
-            userBalances[lease.user] = userBalances[lease.user] + refund;
-        }
-        
-        // Transfer actual cost minus platform fee to provider
-        require(token.transfer(lease.provider, providerAmount), "Provider transfer failed");
-        
-        // Collect platform fee 
-        if (platformFee > 0) {
-            require(token.transfer(deployer, platformFee), "Platform fee transfer failed");
-        }
-        
-        // Unlock the funds from lockedFunds mapping 
-        delete lockedFunds[_leaseId];
+        balances[lease.provider] += providerAmount;
+        frozenFunds[_leaseId] -= providerAmount;
+
+        balances[lease.user] += frozenFunds[_leaseId];
+
+        delete frozenFunds[_leaseId];
         
         lease.completed = true;
         lease.active = false;
-        
-        emit LeaseCompleted(_leaseId, refund, providerAmount);
+
+            address user = leases[_leaseId].user;
+    uint[] storage leasesList = userActiveLeases[user];
+    for (uint i = 0; i < leasesList.length; i++) {
+        if (leasesList[i] == _leaseId) {
+            leasesList[i] = leasesList[leasesList.length - 1];
+            leasesList.pop();
+            break;
+        }
     }
+        emit LeaseCompleted(_leaseId);
+    }
+
+
+    function calculateActualCost(uint _leaseId) 
+    internal 
+    view 
+    returns (uint actualStorageCost, uint actualComputeCost) 
+{
+    Lease storage lease = leases[_leaseId];
+
+    require(lease.startTime > 0, "Lease not started");
+
+    uint duration = block.timestamp - lease.startTime;
+
+    uint totalPaused = lease.pausedDuration;
+    if (lease.paused) {
+        totalPaused += (block.timestamp - lease.pausedAt);
+    }
+
+    actualStorageCost = duration * lease.storagePricePerSecond;
+
+    uint activeDuration = duration > totalPaused ? duration - totalPaused : 0;
+    actualComputeCost = activeDuration * lease.computePricePerSecond;
+
+    return (actualStorageCost, actualComputeCost);
+}
     
-    function cancelLease(uint _leaseId) external onlyLeaseOwner(_leaseId) nonReentrant {
-        Lease storage lease = leases[_leaseId];
-        require(lease.active, "Lease is not active");
-        require(!lease.completed, "Lease already completed");
-        
-        // Cancel within 5 minutes (300 seconds)
-        require(block.timestamp < lease.startTime + 300, "Cannot cancel after 5 minutes");
-        
-        uint refund = lease.totalAmount;
-        
-        // Return funds back to user's balance
-        userBalances[lease.user] = userBalances[lease.user] + refund;
-        
-        // Unlock the funds from lockedFunds mapping 
-        delete lockedFunds[_leaseId];
-        
-        lease.active = false;
-        lease.completed = true;
-        
-        emit LeaseCancelled(_leaseId, refund);
+   function getUserFrozenFunds(address user) 
+    external
+    view
+    returns (FrozenFundsInfo[] memory result) 
+{
+    uint[] storage leasesList = userActiveLeases[user];
+    result = new FrozenFundsInfo[](leasesList.length);
+
+    for (uint i = 0; i < leasesList.length; i++) {
+        uint leaseId = leasesList[i];
+
+        result[i] = FrozenFundsInfo({
+            leaseId: leaseId,
+            amount: frozenFunds[leaseId]
+        });
     }
-    
-    function getLeaseStatus(uint _leaseId) external view returns (bool active, bool completed, bool paused, uint startTime, uint duration, uint pausedDuration) {
-        Lease storage lease = leases[_leaseId];
-        return (lease.active, lease.completed, lease.paused, lease.startTime, lease.duration, lease.pausedDuration);
-    }
-    
-    function getContractBalance() external view returns (uint) {
-        return token.balanceOf(address(this));
-    }
+
+    return result;
+}
+
 }

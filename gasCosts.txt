@@ -1,0 +1,58 @@
+GPULease Gas Tests (raw wei)
+
+=== startLease ===
+gasUsed: 245611
+gasPrice: 577591461
+totalWei: 141862816327671 
+    ✔ startLease gas
+
+=== pauseLease ===
+gasUsed: 52975
+gasPrice: 231185079
+totalWei: 12247029560025
+
+=== resumeLease ===
+gasUsed: 53636
+gasPrice: 202337974
+totalWei: 10852599573464
+    ✔ pause + resume gas
+
+=== completeLease ===
+gasUsed: 105689
+gasPrice: 1055940038
+totalWei: 111601246676182
+    ✔ completeLease gas
+
+=== deposit ===
+gasUsed: 53005
+gasPrice: 1025542125
+totalWei: 54358860335625
+
+=== withdraw ===
+gasUsed: 47307
+gasPrice: 1022355001
+totalWei: 48364548032307
+    ✔ deposit + withdraw gas
+
+=== getUserFrozenFunds (5 leases) ===
+estimated gas: 51316
+    ✔ multiple leases scaling gas (46ms)
+
+
+startLease
+≈ $0.30
+
+pauseLease
+≈ $0.026
+
+resumeLease
+≈ $0.023
+
+completeLease
+≈ $0.24
+
+deposit
+≈ $0.116
+
+withdraw
+≈ $0.103
